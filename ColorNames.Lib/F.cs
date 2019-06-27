@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Linq;
+using System.Net;
 using System.Text.RegularExpressions;
 using UnidecodeSharpCore;
 
@@ -25,6 +26,12 @@ namespace ColorNames.Lib
         {
             string str = input.Unidecode().Sanitize();
             return char.IsDigit(str[0]) ? "_" + str : str;
+        }
+
+        public static long GetBytes(this WebClient wc, string url)
+        {
+            wc.OpenRead(url);
+            return Convert.ToInt64(wc.ResponseHeaders["Content-Length"]);
         }
     }
 }

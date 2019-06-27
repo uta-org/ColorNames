@@ -6,72 +6,158 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Threading.Tasks;
 using ColorNames.Lib;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Newtonsoft.Json;
+using ShellProgressBar;
 using Syntax = Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace ColorNames.Shell
 {
     internal class Program
     {
+        private const int STEPS = 5;
+
+        private const double PROGRESS_STEP = .2;
+
+        private static ProgressBarOptions childOptions;
+
         private static void Main(string[] args)
         {
             const string colorNamesUrl =
                 "https://raw.githubusercontent.com/meodai/color-names/master/src/colornames.csv";
 
             var sw = Stopwatch.StartNew();
+            // int curStep = 0;
 
-            string csvContents;
-            using (var wc = new WebClient())
-                csvContents = wc.DownloadString(colorNamesUrl);
+            var options = new ProgressBarOptions
+            {
+                ForegroundColor = ConsoleColor.Yellow,
+                BackgroundColor = ConsoleColor.DarkYellow,
+                ProgressCharacter = '─'
+            };
 
-            List<ColorEntity> entities = csvContents.GetLines().Skip(1).Select(line =>
+            childOptions = new ProgressBarOptions
+            {
+                ForegroundColor = ConsoleColor.Green,
+                BackgroundColor = ConsoleColor.DarkGreen,
+                ProgressCharacter = '─',
+                CollapseWhenFinished = false
+            };
+
+            using (var progress = new ProgressBar(STEPS, string.Empty, options))
+            {
+                progress.Message = "Downloading content!";
+                string csvContents;
+
+                using (var wc = new WebClient())
+                using (var child = progress.Spawn((int)wc.GetBytes(colorNamesUrl), "bytes downloaded", childOptions))
                 {
-                    var split = line.Split(',');
-                    return new ColorEntity() { Name = split[0], Hex = split[1] };
-                })
-                .ToList();
+                    wc.DownloadProgressChanged += (sender, e) => WcOnDownloadProgressChanged(sender, e, child);
+                    csvContents = wc.DownloadString(colorNamesUrl);
+                }
 
-            string folder = Path.Combine(Environment.CurrentDirectory, "Generated");
+                var lines = csvContents.GetLines();
+                progress.MaxTicks = lines.Length + STEPS - 2;
 
-            if (!Directory.Exists(folder))
-                Directory.CreateDirectory(folder);
+                progress.Message = "Parsing entities!";
+                List<ColorEntity> entities;
 
-            string generatedFile_ColorNames = Path.Combine(folder, "ColorNames.cs");
-            string generatedFile_NamedColor = Path.Combine(folder, "NamedColor.cs");
-            string generatedJSONFile = Path.Combine(folder, "ColorNames.json");
+                using (var child = progress.Spawn(lines.Length, "lines parsed", childOptions))
+                    entities = lines.Skip(1).Select(line =>
+                    {
+                        var split = line.Split(',');
+                        var entity = new ColorEntity { Name = split[0], Hex = split[1] };
+
+                        child.Tick();
+
+                        return entity;
+                    })
+                    .ToList();
+
+                string folder = Path.Combine(Environment.CurrentDirectory, "Generated");
+
+                if (!Directory.Exists(folder))
+                    Directory.CreateDirectory(folder);
+
+                string generatedFile_ColorNames = Path.Combine(folder, "ColorNames.cs");
+                string generatedFile_NamedColor = Path.Combine(folder, "NamedColor.cs");
+                string generatedJSONFile = Path.Combine(folder, "ColorNames.json");
 
 #if !TEST
-            Console.WriteLine("Saving ColorNames class!");
-            string contents_colorNames = CreateClass_ColorNames(entities);
-            File.WriteAllText(generatedFile_ColorNames, contents_colorNames);
+                progress.Message = "Saving ColorNames class!";
 
-            Console.WriteLine("Saving NamedColor class!");
-            string contents_namedColor = CreateClass_NamedColor(entities);
-            File.WriteAllText(generatedFile_NamedColor, contents_namedColor);
+                Task.Factory.StartNew(() =>
+                {
+                    string contents_colorNames = CreateClass_ColorNames(entities, progress);
+                    File.WriteAllText(generatedFile_ColorNames, contents_colorNames);
+                });
 
-            Console.WriteLine("Generating dictionary!");
-            var dict = entities.ToDictionary(t => (Lib.ColorNames)Enum.Parse(typeof(Lib.ColorNames), t.Name.SanitizeEnum()),
-                t => t);
-            string jsonContents = JsonConvert.SerializeObject(dict, Formatting.Indented);
+                progress.Message = "Saving NamedColor class!";
 
-            Console.WriteLine("Converting json!");
-            File.WriteAllText(generatedJSONFile, jsonContents);
+                Task.Factory.StartNew(() =>
+                {
+                    string contents_namedColor = CreateClass_NamedColor(entities, progress);
+                    File.WriteAllText(generatedFile_NamedColor, contents_namedColor);
+                });
 
-            sw.Stop();
-            Console.WriteLine($"Converted successfully in {sw.ElapsedMilliseconds / 1000.0:F2} s!");
+                progress.Message = "Generating dictionary!";
+
+                Dictionary<Lib.ColorNames, ColorEntity> dict;
+                Dictionary<string, Lib.ColorNames> enumDict;
+                Array enumArr = Enum.GetValues(typeof(Lib.ColorNames));
+
+                using (var child = progress.Spawn(enumArr.Length, "enum items added to parse", childOptions))
+                {
+                    enumDict = enumArr
+                    .Cast<Lib.ColorNames>()
+                    .Select((x, i) => new { Item = x, Index = i })
+                    .ToDictionary(t =>
+                    {
+                        child.Tick();
+
+                        return t.Item.ToString();
+                    }, t => t.Item);
+                }
+
+                using (var child = progress.Spawn(enumArr.Length, "entities parsed", childOptions))
+                {
+                    dict = entities
+                    .Select((x, i) => new { Item = x, Index = i })
+                    .ToDictionary(t =>
+                    {
+                        child.Tick();
+
+                        return enumDict[t.Item.Name.SanitizeEnum()];
+                    }, t => t.Item);
+                }
+
+                string jsonContents = JsonConvert.SerializeObject(dict, Formatting.Indented);
+
+                progress.Message = "Converting json!";
+                File.WriteAllText(generatedJSONFile, jsonContents);
+
+                sw.Stop();
+                progress.Message = $"Converted successfully in {sw.ElapsedMilliseconds / 1000.0:F2} s!";
 #else
             // Console.WriteLine("Saving NamedColor class!");
             string contents_namedColor = CreateClass_NamedColor(entities);
             Console.WriteLine(contents_namedColor);
 #endif
+            }
+
             Console.ReadLine();
         }
 
-        private static string CreateClass_NamedColor(List<ColorEntity> entities)
+        private static void WcOnDownloadProgressChanged(object sender, DownloadProgressChangedEventArgs e, ChildProgressBar childProgressBar)
+        {
+            childProgressBar.Tick((int)e.BytesReceived);
+        }
+
+        private static string CreateClass_NamedColor(List<ColorEntity> entities, ProgressBar progress)
         {
             // Create a namespace: (namespace UnityEngine.Utils)
             var @namespace = Syntax.NamespaceDeclaration(Syntax.ParseName("UnityEngine.Utils")).NormalizeWhitespace();
@@ -87,63 +173,81 @@ namespace ColorNames.Shell
                 Syntax.Token(SyntaxKind.PublicKeyword),
                 Syntax.Token(SyntaxKind.PartialKeyword));
 
-            // Create a string variable: (bool canceled;)
-            var variableDeclarations = entities.Select(entity =>
+            string code;
+            using (var child = progress.Spawn(entities.Count, "fields added", childOptions))
             {
-                string varName = entity.Name.SanitizeEnum();
-                return Syntax.VariableDeclaration(Syntax.ParseTypeName("NamedColor"))
-                    // .AddVariables(Syntax.VariableDeclarator("canceled"))
-                    .WithVariables(Syntax.SingletonSeparatedList(
-                        Syntax.VariableDeclarator(
-                                Syntax.Identifier(varName))
-                            .WithInitializer(
-                                Syntax.EqualsValueClause(
-                                    Syntax.ParseExpression($"new NamedColor(ColorNames.{varName}, " +
-                                                           $"{entity.Hex.ToUpperInvariant().Replace("#", "0x")})")
-                                ))));
-            });
+                // Create a string variable: (bool canceled;)
+                var variableDeclarations = entities.Select((entity, index) =>
+                {
+                    //double prog = (double)index / entities.Count / STEPS;
+                    //progress.Report(PROGRESS_STEP * lastStep + prog);
 
-            // Create a field declaration: (private bool canceled;)
-            var fieldDeclarations = variableDeclarations.Select(variableDeclaration => Syntax.FieldDeclaration(variableDeclaration)
-                .AddModifiers(
-                    Syntax.Token(SyntaxKind.PrivateKeyword),
-                    Syntax.Token(SyntaxKind.StaticKeyword)));
+                    child.Tick();
 
-            // Add the field, the property and method to the class.
-            classDeclaration = classDeclaration.AddMembers(fieldDeclarations.ToArray());
+                    string varName = entity.Name.SanitizeEnum();
+                    return Syntax.VariableDeclaration(Syntax.ParseTypeName("NamedColor"))
+                        // .AddVariables(Syntax.VariableDeclarator("canceled"))
+                        .WithVariables(Syntax.SingletonSeparatedList(
+                            Syntax.VariableDeclarator(
+                                    Syntax.Identifier(varName))
+                                .WithInitializer(
+                                    Syntax.EqualsValueClause(
+                                        Syntax.ParseExpression($"new NamedColor(ColorNames.{varName}, " +
+                                                               $"{entity.Hex.ToUpperInvariant().Replace("#", "0x")})")
+                                    ))));
+                });
 
-            // Add the class to the namespace.
-            @namespace = @namespace.AddMembers(classDeclaration);
+                // Create a field declaration: (private bool canceled;)
+                var fieldDeclarations = variableDeclarations.Select(variableDeclaration => Syntax.FieldDeclaration(variableDeclaration)
+                    .AddModifiers(
+                        Syntax.Token(SyntaxKind.PrivateKeyword),
+                        Syntax.Token(SyntaxKind.StaticKeyword)));
 
-            // Normalize and get code as string.
-            var code = @namespace
-                .NormalizeWhitespace()
-                .ToFullString();
+                // Add the field, the property and method to the class.
+                classDeclaration = classDeclaration.AddMembers(fieldDeclarations.ToArray());
+
+                // Add the class to the namespace.
+                @namespace = @namespace.AddMembers(classDeclaration);
+
+                // Normalize and get code as string.
+                code = @namespace
+                    .NormalizeWhitespace()
+                    .ToFullString();
+            }
 
             // Output new code to the console.
             return code;
         }
 
-        private static string CreateClass_ColorNames(List<ColorEntity> entities)
+        private static string CreateClass_ColorNames(List<ColorEntity> entities, ProgressBar progress)
         {
-            var members = entities.Select((entity, index) =>
+            string classDeclaration;
+            using (var child = progress.Spawn(entities.Count, "enum items added", childOptions))
             {
-                // Console.WriteLine($"Converted {index} of {entities.Count} entities!");
-                return Syntax.EnumMemberDeclaration(identifier:
-                    Syntax.Identifier(entity.Name.SanitizeEnum()));
-            });
+                var members = entities.Select((entity, index) =>
+                {
+                    //double prog = (double)index / entities.Count / STEPS;
+                    //progress.Report(PROGRESS_STEP * lastStep + prog);
 
-            Console.WriteLine("Declaring enum!");
-            var declaration = Syntax.EnumDeclaration(
-                    new SyntaxList<AttributeListSyntax>(),
-                    identifier: Syntax.Identifier("ColorNames"),
-                    modifiers: Syntax.TokenList(Syntax.Token(SyntaxKind.PublicKeyword)),
-                    baseList: null,
-                    members: Syntax.SeparatedList(members))
-                .NormalizeWhitespace();
+                    child.Tick();
 
-            Console.WriteLine("Converting to string!");
-            string classDeclaration = declaration.ToFullString();
+                    // Console.WriteLine($"Converted {index} of {entities.Count} entities!");
+                    return Syntax.EnumMemberDeclaration(identifier:
+                        Syntax.Identifier(entity.Name.SanitizeEnum()));
+                });
+
+                // TODO
+                // Console.WriteLine("Declaring enum!");
+                var declaration = Syntax.EnumDeclaration(
+                        new SyntaxList<AttributeListSyntax>(),
+                        identifier: Syntax.Identifier("ColorNames"),
+                        modifiers: Syntax.TokenList(Syntax.Token(SyntaxKind.PublicKeyword)),
+                        baseList: null,
+                        members: Syntax.SeparatedList(members))
+                    .NormalizeWhitespace();
+
+                classDeclaration = declaration.ToFullString();
+            }
 
             return classDeclaration;
         }
