@@ -62,8 +62,11 @@ namespace ColorNames.Shell
             Console.WriteLine("Converting to string!");
             File.WriteAllText(generatedFile, declaration.ToFullString());
 
+            Console.WriteLine("Generating dictionary!");
+            var dict = entities.ToDictionary(t => (Lib.ColorNames)Enum.Parse(typeof(Lib.ColorNames), t.Name.SanitizeEnum()), t => t);
+
             Console.WriteLine("Converting json!");
-            File.WriteAllText(generatedJSONFile, JsonConvert.SerializeObject(entities, Formatting.Indented));
+            File.WriteAllText(generatedJSONFile, JsonConvert.SerializeObject(dict, Formatting.Indented));
 
             sw.Stop();
             Console.WriteLine($"Converted successfully in {sw.ElapsedMilliseconds / 1000.0:F2} s!");
